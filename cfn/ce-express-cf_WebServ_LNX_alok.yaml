@@ -1,0 +1,227 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'Cloud Formation Template for WebServer ASG'
+Parameters:
+  InstanceType:
+    Description: WebServer instance type
+    Type: String
+    Default: t3.micro
+  VpcStackName:
+    Description: Provide the name of the VPC stack here. Must already exist!
+    Type: String
+    Default: alok-vpc1
+Resources:
+  WebServerASG:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      DesiredCapacity: '2'
+      MaxSize: '4'
+      MinSize: '2'
+      VPCZoneIdentifier:
+        Fn::Split:
+            - ","
+            - Fn::ImportValue:
+                Fn::Sub: ${VpcStackName}-PrivSub-IDs
+      LaunchConfigurationName: !Ref WebServerLC
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+      Tags:
+      - Key: Name
+        Value: 'WebServer'
+        PropagateAtLaunch: "true"
+  ScaleUpPolicy:
+      Type: AWS::AutoScaling::ScalingPolicy
+      Properties:
+        AdjustmentType: ChangeInCapacity
+        AutoScalingGroupName:
+          Ref: WebServerASG
+        Cooldown: '1'
+        ScalingAdjustment: '1'
+  CPUAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+       EvaluationPeriods: '1'
+       Statistic: Average
+       Threshold: '10'
+       AlarmDescription: Alarm if CPU too high or metric disappears indicating instance
+         is down
+       Period: '60'
+       AlarmActions:
+       - Ref: ScaleUpPolicy
+       Namespace: AWS/EC2
+       Dimensions:
+       - Name: AutoScalingGroupName
+         Value:
+           Ref: WebServerASG
+       ComparisonOperator: GreaterThanThreshold
+       MetricName: CPUUtilization
+  WebServerLC:
+    Type: 'AWS::AutoScaling::LaunchConfiguration'
+    Properties:
+      InstanceType: !Ref InstanceType
+      SecurityGroups:
+        - !Ref WebServerSG
+      ImageId: ami-082b5a644766e0e6f
+      IamInstanceProfile: !Ref InstanceProfRole
+      UserData: !Base64
+        'Fn::Sub': |
+          #!/bin/bash -xe
+          # 1) Install App (Amazon Linux 2 specific)
+          yum update -y
+          systemctl start amazon-ssm-agent
+          systemctl enable amazon-ssm-agent
+          yum install -y httpd
+          cd /var/www/html/
+          curl -O 'https://ce-test-bg-image-onica.s3-us-west-2.amazonaws.com/index.html'
+          # Can remove the start command and ask to SSH into instance.
+          systemctl start httpd
+          systemctl enable httpd
+          echo "sudo aws s3 cp /var/log/httpd/access_log s3://ce-test-logs-us-west-2-546651635484-lnx/raw_\`hostname\`_access_log" > /var/backup-log.sh
+          echo "gzip -k /var/log/httpd/access_log" >> /var/compress-log.sh
+          echo "sudo aws s3 mv /var/log/httpd/access_log.zip s3://ce-test-logs-us-west-2-546651635484-lnx/compress_\`hostname\`_access_log_zip" >> /var/compress-log.sh
+          chmod 777 /var/backup-log.sh
+          chmod 777 /var/compress-log.sh
+          crontab -l > mycron
+          echo "*/5 * * * * /var/backup-log.sh" >> mycron
+          echo "0 0 * * * /var/compress-log.sh" >> mycron
+          crontab mycron
+          rm mycron
+          service httpd start
+  WebServerSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable SSH and HTTP access
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: ${VpcStackName}-VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          SourceSecurityGroupId: !Ref ELBSG
+          Description: 'HTTP access'
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          SourceSecurityGroupId: !Ref ELBSG
+          Description: 'HTTPS access'
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: "10.0.0.0/0"
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          CidrIp: "0.0.0.0/0"
+  ELBSG:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable SSH and HTTP access from all
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: ${VpcStackName}-VPCID
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: "0.0.0.0/0"
+          Description: 'HTTP access'
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          CidrIp: "0.0.0.0/0"
+          Description: 'HTTPS access'
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: "0.0.0.0/0"
+  ApplicationLoadBalancer:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      Subnets:
+        Fn::Split:
+            - ","
+            - Fn::ImportValue:
+                Fn::Sub: ${VpcStackName}-PubSub-IDs
+      SecurityGroups:
+        - !Ref ELBSG
+  ALBListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: '80'
+      Protocol: HTTP
+  ALBTargetGroup:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      HealthCheckPath: '/'
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 3
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: ${VpcStackName}-VPCID
+  # Assign role to instance using InstanceProfile.
+  InstanceProfRole:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref WebServerRole
+  WebServerRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+  # Necessary permissions to access EC2 or Session Manager or S3 (if required)
+  WebServerPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: WebServerPolicy
+      PolicyDocument:
+        Statement:
+          - Effect: "Allow"
+            Action:
+            - "ec2:*"
+            - "ssm:*"
+            - "s3:*"
+            Resource: "*"
+      Roles:
+        - !Ref WebServerRole
+  LogsBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub 'ce-test-logs-${AWS::Region}-${AWS::AccountId}-lnx'
+      LifecycleConfiguration:
+        Rules:
+        - Id: Delete30day
+          Prefix: compress
+          Status: Enabled
+          ExpirationInDays: '30'
+        - Id: compress1day
+          Prefix: raw
+          Status: Enabled
+          ExpirationInDays: '1'
+    DeletionPolicy: Delete
+Outputs:
+  URL:
+    Description: URL of the website
+    Value: !Join
+      - ''
+      - - 'http://'
+        - Fn::GetAtt: [ ApplicationLoadBalancer, DNSName ]
