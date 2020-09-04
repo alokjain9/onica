@@ -1,0 +1,15 @@
+﻿1. Requests sent to the application should return “Hello Onica” and image file
+2.  Application will scale based on CPU consumption and threshold define as 10.
+3. The bash script in crontab, every 5 min, sends the /var/logs/httpd/access_logs to the S3 bucket
+4. Application VMs are not publicly accessible
+5.  I added s3 access all role to ec2 instances, but got some issue in uploading files to S3, otherwise script logic and lifecycle seems ok
+6.  Logs in S3 bucket compressed daily (at midnight logs are zipped on all VMs, uploaded to S3, and raw logs are removed daily)
+7.  The compressed Logs have lifecycle of 30 days
+8. Code is commited in my github repository.
+
+
+
+● Excellent outcome, we are in for a long term contract with your company:
+○ You managed to save our “go live” date and fixed the site : YES
+○ You fixed our template and we have a repeatable and reliable way to deploy our site globally anytime : YES
+○ You implemented the missing piece of infrastructure responsible for logs compression : Partial (need more time to debug the issue with VM uploading files on S3)

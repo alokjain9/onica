@@ -60,7 +60,7 @@ Resources:
       InstanceType: !Ref InstanceType
       SecurityGroups:
         - !Ref WebServerSG
-      ImageId: ami-082b5a644766e0e6f
+      ImageId: ami-073247104ee15be9b
       IamInstanceProfile: !Ref InstanceProfRole
       UserData: !Base64
         'Fn::Sub': |
